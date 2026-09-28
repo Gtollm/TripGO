@@ -96,6 +96,11 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, r *http.Request, err 
 		h.writeProblem(
 			w, r, http.StatusConflict, "driver_busy", "Driver busy", "driver-busy", "Driver already has an active trip",
 		)
+	case errors.Is(err, trip.ErrIdempotencyConflict):
+		h.writeProblem(
+			w, r, http.StatusConflict, "idempotency_conflict", "Idempotency conflict", "idempotency-conflict",
+			"Idempotency-Key was already used with a different request body",
+		)
 	default:
 		h.logger.Error("request failed", "error", err, "path", r.URL.Path)
 		h.writeProblem(

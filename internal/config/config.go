@@ -9,8 +9,9 @@ import (
 )
 
 type Config struct {
-	LogLevel        string
-	ShutdownTimeout time.Duration
+	LogLevel          string
+	ShutdownTimeout   time.Duration
+	IdempotencyKeyTTL time.Duration
 
 	DatabaseConfig DatabaseConfig
 	HttpConfig     HttpConfig
@@ -45,6 +46,11 @@ func loadFromEnv(cfg *Config) error {
 	cfg.LogLevel = logLevel
 
 	cfg.ShutdownTimeout, err = requiredDuration("SHUTDOWN_TIMEOUT")
+	if err != nil {
+		return err
+	}
+
+	cfg.IdempotencyKeyTTL, err = requiredDuration("IDEMPOTENCY_KEY_TTL")
 	if err != nil {
 		return err
 	}

@@ -29,7 +29,7 @@ curl -i localhost:8080/ready
 
 | Метод | Путь | Успех           |
 |---|---|-----------------|
-| `POST` | `/api/v1/trips` | `201`           |
+| `POST` | `/api/v1/trips` | `201`, с `Idempotency-Key` — `200` |
 | `GET` | `/api/v1/trips/{tripId}` | `200`           |
 | `POST` | `/api/v1/trips/{tripId}/finish` | `200`           |
 | `GET` | `/health` | `200`           |
@@ -44,6 +44,7 @@ curl -i localhost:8080/ready
 | `HTTP_ADDR` | 
 | `LOG_LEVEL` | 
 | `SHUTDOWN_TIMEOUT` |
+| `IDEMPOTENCY_KEY_TTL` |
 | `DATABASE_URL` |
 | `DATABASE_MAX_CONNS` |
 | `DATABASE_MIN_CONNS` | 
@@ -77,6 +78,12 @@ curl -i localhost:8080/ready
 ### Одна активная поездка на водителя
 
 В миграции `0001_init_trips.sql` есть уникальный индекс `trips_driver_id_active_idx` по `driver_id` с условием `status = 'active'`. Завершённых поездок у водителя может быть сколько угодно, а активная - одна.
+
+### Идемпотентность
+
+Ключ из заголовка Idempotency-Key хранится в таблице `idempotency_keys` `IDEMPOTENCY_KEY_TTL` времени. Вместе с ключом лежат SHA-256 от полей запроса и `trip_id` созданной поездки.
+
+Ключ, поездка и журнал статусов пишутся в одной транзакции `Do`. Сначала удаляется просроченная запись с этим ключом, затем ключ вставляется обычным `INSERT`. 
 
 ## Образ
 

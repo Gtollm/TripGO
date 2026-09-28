@@ -121,7 +121,8 @@ func newPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, err
 
 func newHTTPServer(cfg *config.Config, pool *pgxpool.Pool, logger *slog.Logger) *http.Server {
 	repo := repository.NewPostgresRepository(pool, cfg.DatabaseConfig.QueryTimeout)
-	trips := service.New(repo, postgres.NewTxManager(pool))
+	keys := repository.NewPostgresIdempotencyRepository(pool, cfg.DatabaseConfig.QueryTimeout)
+	trips := service.New(repo, keys, postgres.NewTxManager(pool), cfg.IdempotencyKeyTTL)
 	httpHandler := handler.New(trips, pool, logger, cfg.DatabaseConfig.QueryTimeout)
 
 	return &http.Server{

@@ -12,7 +12,7 @@ import (
 	api "github.com/Gtollm/TripGO/internal/generated"
 )
 
-func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, _ api.CreateTripParams) {
+func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params api.CreateTripParams) {
 	body, err := decodeCreateTrip(w, r)
 	if err != nil {
 		h.logger.Info("invalid create trip request", "error", err, "path", r.URL.Path)
@@ -20,8 +20,9 @@ func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, _ api.Creat
 		return
 	}
 
-	created, err := h.trips.Create(
+	created, repeated, err := h.trips.Create(
 		r.Context(),
+		params.IdempotencyKey,
 		body.UserId,
 		body.DriverId,
 		trip.Coordinates{Latitude: body.StartPoint.Latitude, Longitude: body.StartPoint.Longitude},
@@ -36,6 +37,13 @@ func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, _ api.Creat
 	response, err := toAPI(created)
 	if err != nil {
 		h.writeServiceError(w, r, err)
+		return
+	}
+
+	if repeated {
+		if err := writeJSON(w, http.StatusOK, response); err != nil {
+			h.logger.Error("write repeated trip response", "error", err)
+		}
 		return
 	}
 
