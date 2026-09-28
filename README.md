@@ -1,45 +1,79 @@
-# TripGo — репозиторий для лабораторных работ
+# TripGo Trip Service
 
-Заготовка курса «Разработка микросервисов на Go». Здесь вы делаете все пять
-работ: каждая следующая продолжает предыдущую, переписывать сервис с нуля не
-нужно.
+HTTP-сервис поездок.
 
-## Что делать сразу
-
-1. **Fork** этого репозитория к себе. Форк нужен, чтобы преподаватели видели
-   список всех работ курса одной страницей.
-2. Заведите модуль:
+## Запуск
 
 ```bash
-git clone git@github.com:<ваш-логин>/<ваш-репозиторий>.git
-cd <ваш-репозиторий>
-go mod init github.com/<ваш-логин>/<ваш-репозиторий>
+tripgoctl cluster start
 ```
 
-Путь модуля потом не меняется — иначе придётся править все импорты. Проще всего
-взять адрес своего репозитория, каким бы он ни был.
+```bash
+tripgoctl environment start
+make migrate
+make run
+```
 
-Дальше — [`homework/docs/getting-started.md`](https://github.com/course-go-autumn-2026/course/blob/main/homework/docs/getting-started.md)
-в репозитории курса: инструменты, окружение, миграции, вид сданной работы.
+Сервис слушает `HTTP_ADDR`, по умолчанию `:8080`.
 
-## Где что лежит
+Проверка:
 
-| Что | Где |
+```bash
+curl -i localhost:8080/health
+curl -i localhost:8080/ready
+```
+
+`/health` отвечает `200`, пока процесс жив. `/ready` отвечает `200`, если PostgreSQL доступен, и `503` иначе.
+
+## Ручки
+
+| Метод | Путь | Успех           |
+|---|---|-----------------|
+| `POST` | `/api/v1/trips` | `201`           |
+| `GET` | `/api/v1/trips/{tripId}` | `200`           |
+| `POST` | `/api/v1/trips/{tripId}/finish` | `200`           |
+| `GET` | `/health` | `200`           |
+| `GET` | `/ready` | `200` или `503` |
+
+## Переменные окружения
+
+ Пример значений - `.env.example`.
+
+| Переменная |
+|---|
+| `HTTP_ADDR` | 
+| `LOG_LEVEL` | 
+| `SHUTDOWN_TIMEOUT` |
+| `DATABASE_URL` |
+| `DATABASE_MAX_CONNS` |
+| `DATABASE_MIN_CONNS` | 
+| `DATABASE_MAX_CONN_LIFETIME` |
+| `DATABASE_CONNECT_TIMEOUT` |
+| `DATABASE_QUERY_TIMEOUT` |
+
+
+## Команды
+
+| Команда | Что делает |
 |---|---|
-| Задания, документация, контракты | [`course-go-autumn-2026/course`](https://github.com/course-go-autumn-2026/course) |
-| Слайды и записи лекций | [`lections/`](https://github.com/course-go-autumn-2026/course/tree/main/lections) |
-| Как оценивают, дедлайны, порядок сдачи | [`homework/docs/grading.md`](https://github.com/course-go-autumn-2026/course/blob/main/homework/docs/grading.md) |
-| Локальное окружение и утилита `tripgoctl` | [`course-go-autumn-2026/course-infra`](https://github.com/course-go-autumn-2026/course-infra) |
+| `make migrate` | накатить миграции goose |
+| `make run` | запустить сервис |
+| `make test` | `go test -race ./...`; в этой работе тестов нет, команда завершается успешно |
+| `make lint` | `golangci-lint` |
+| `make generate` | заново сгенерировать HTTP-типы и enum статуса |
 
-Задания появляются по мере курса, каждое — после своей пары лекций.
+## Решения
 
-## Как сдавать
+### Уровень изоляции
 
-Ветка `homework/NN` от `main`, pull request в `main` своего форка, ссылка
-ментору до дедлайна. Подробно — в `grading.md` репозитория курса.
+В `Do` транзакция открывается с `Read Committed`.
 
-## Чужие работы
+Для запрета второй активной поездки этого достаточно. Наш индекс сериализует две вставки сам. Вторая ждёт первую и после её коммита получает ошибку дубликата.
 
-Форки видны всем, включая ваши. Смотреть чужие решения, пока идёт курс, —
-плохая идея: одинаковый код виден сразу, а разбираться на защите придётся
-самому.
+### Менеджер транзакций
+
+`PostgresTxManager.Do` открывает транзакцию, кладёт `pgx.Tx` в `context` и вызывает переданную функцию с этим контекстом. Ошибка или паника приводят к `ROLLBACK`, паника после этого пробрасывается дальше. Откат вызывается с `context.WithoutCancel`, чтобы отмененный контекскт не прервал роллбэк.
+
+### Одна активная поездка на водителя
+
+В миграции `0001_init_trips.sql` есть уникальный индекс `trips_driver_id_active_idx` по `driver_id` с условием `status = 'active'`. Завершённых поездок у водителя может быть сколько угодно, а активная - одна.
