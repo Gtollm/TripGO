@@ -92,7 +92,7 @@ curl -i localhost:8080/ready
 Собрать и запустить рядом с PostgreSQL из tripgoctl
 
 ```bash
-docker build -t trip-service:lab1 .
+docker build -f deploy/Dockerfile -t trip-service:lab1 .
 docker run --rm -p 8080:8080 \
   --env-file .env \
   -e DATABASE_URL=postgres://tripgo:tripgo@host.docker.internal:21032/tripgo?sslmode=disable \
