@@ -27,7 +27,11 @@ type DatabaseConfig struct {
 }
 
 type HttpConfig struct {
-	Addr string
+	Addr              string
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
 }
 
 func Load() (*Config, error) {
@@ -106,6 +110,23 @@ func loadHttpCfgFromEnv(cfg *HttpConfig) error {
 		return err
 	}
 	cfg.Addr = httpAddr
+
+	cfg.ReadHeaderTimeout, err = requiredDuration("HTTP_READ_HEADER_TIMEOUT")
+	if err != nil {
+		return err
+	}
+	cfg.ReadTimeout, err = requiredDuration("HTTP_READ_TIMEOUT")
+	if err != nil {
+		return err
+	}
+	cfg.WriteTimeout, err = requiredDuration("HTTP_WRITE_TIMEOUT")
+	if err != nil {
+		return err
+	}
+	cfg.IdleTimeout, err = requiredDuration("HTTP_IDLE_TIMEOUT")
+	if err != nil {
+		return err
+	}
 
 	return nil
 }

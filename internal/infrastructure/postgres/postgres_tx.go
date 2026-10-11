@@ -3,17 +3,19 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type PostgresTxManager struct {
-	pool *pgxpool.Pool
+	pool         *pgxpool.Pool
+	queryTimeout time.Duration
 }
 
-func NewTxManager(pool *pgxpool.Pool) *PostgresTxManager {
-	return &PostgresTxManager{pool: pool}
+func NewTxManager(pool *pgxpool.Pool, queryTimeout time.Duration) *PostgresTxManager {
+	return &PostgresTxManager{pool: pool, queryTimeout: queryTimeout}
 }
 
 type txKey struct{}
@@ -23,9 +25,11 @@ func (p PostgresTxManager) Do(ctx context.Context, fn func(ctx context.Context) 
 		return fn(ctx)
 	}
 
-	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{
+	beginCtx, cancelBegin := context.WithTimeout(ctx, p.queryTimeout)
+	tx, err := p.pool.BeginTx(beginCtx, pgx.TxOptions{
 		IsoLevel: pgx.ReadCommitted,
 	})
+	cancelBegin()
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -33,7 +37,9 @@ func (p PostgresTxManager) Do(ctx context.Context, fn func(ctx context.Context) 
 
 	defer func() {
 		rec := recover()
-		_ = tx.Rollback(context.WithoutCancel(ctx))
+		rollbackCtx, cancelRollback := context.WithTimeout(context.WithoutCancel(ctx), p.queryTimeout)
+		defer cancelRollback()
+		_ = tx.Rollback(rollbackCtx)
 		if rec != nil {
 			panic(rec)
 		}
@@ -42,7 +48,9 @@ func (p PostgresTxManager) Do(ctx context.Context, fn func(ctx context.Context) 
 	if err := fn(ctx); err != nil {
 		return err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	commitCtx, cancelCommit := context.WithTimeout(ctx, p.queryTimeout)
+	defer cancelCommit()
+	if err := tx.Commit(commitCtx); err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil

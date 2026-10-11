@@ -156,7 +156,7 @@ func allowedKeys(fields map[string]json.RawMessage, required ...string) error {
 	allowed := make(map[string]struct{}, len(required))
 	for _, key := range required {
 		allowed[key] = struct{}{}
-		if _, ok := fields[key]; !ok {
+		if raw, ok := fields[key]; !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			return fmt.Errorf("%s is required", key)
 		}
 	}

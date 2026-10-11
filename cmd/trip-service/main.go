@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -18,13 +17,6 @@ import (
 	"github.com/Gtollm/TripGO/internal/infrastructure/postgres"
 	"github.com/Gtollm/TripGO/internal/repository"
 	"github.com/Gtollm/TripGO/internal/service"
-)
-
-const (
-	readHeaderTimeout = 5 * time.Second
-	readTimeout       = 10 * time.Second
-	writeTimeout      = 15 * time.Second
-	idleTimeout       = 60 * time.Second
 )
 
 func main() {
@@ -122,15 +114,15 @@ func newPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, err
 func newHTTPServer(cfg *config.Config, pool *pgxpool.Pool, logger *slog.Logger) *http.Server {
 	repo := repository.NewPostgresRepository(pool, cfg.DatabaseConfig.QueryTimeout)
 	keys := repository.NewPostgresIdempotencyRepository(pool, cfg.DatabaseConfig.QueryTimeout)
-	trips := service.New(repo, keys, postgres.NewTxManager(pool), cfg.IdempotencyKeyTTL)
+	trips := service.New(repo, keys, postgres.NewTxManager(pool, cfg.DatabaseConfig.QueryTimeout), cfg.IdempotencyKeyTTL)
 	httpHandler := handler.New(trips, pool, logger, cfg.DatabaseConfig.QueryTimeout)
 
 	return &http.Server{
 		Addr:              cfg.HttpConfig.Addr,
 		Handler:           httpHandler.Routes(),
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
-		IdleTimeout:       idleTimeout,
+		ReadHeaderTimeout: cfg.HttpConfig.ReadHeaderTimeout,
+		ReadTimeout:       cfg.HttpConfig.ReadTimeout,
+		WriteTimeout:      cfg.HttpConfig.WriteTimeout,
+		IdleTimeout:       cfg.HttpConfig.IdleTimeout,
 	}
 }

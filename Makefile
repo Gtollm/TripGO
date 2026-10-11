@@ -1,6 +1,7 @@
 .PHONY: migrate run test lint generate
 
-include .env
+-include .env
+-include .env.local
 export
 
 migrate:

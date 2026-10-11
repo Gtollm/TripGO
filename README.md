@@ -4,15 +4,31 @@ HTTP-сервис поездок.
 
 ## Запуск
 
-```bash
-tripgoctl cluster start
-```
+Нужны Go 1.26+, запущенный Docker и `tripgoctl`. Команды выполняются из корня репозитория.
 
 ```bash
+tripgoctl cluster start
 tripgoctl environment start
+```
+
+При первом запуске создайте `.env.local` с настройками приложения:
+
+```bash
+IDEMPOTENCY_KEY_TTL=24h
+HTTP_READ_HEADER_TIMEOUT=5s
+HTTP_READ_TIMEOUT=10s
+HTTP_WRITE_TIMEOUT=15s
+HTTP_IDLE_TIMEOUT=60s
+```
+
+После этого
+
+```bash
 make migrate
 make run
 ```
+
+Makefile читает созданный `tripgoctl` файл `.env`, затем `.env.local`: локальные значения имеют приоритет. Адрес БД берётся из `.env`. Оба файла исключены из git; `.env.local` сохраняется при повторном запуске окружения. Полный пример конфигурации — `.env.example`.
 
 Сервис слушает `HTTP_ADDR`, по умолчанию `:8080`.
 
@@ -29,7 +45,7 @@ curl -i localhost:8080/ready
 
 | Метод | Путь | Успех           |
 |---|---|-----------------|
-| `POST` | `/api/v1/trips` | `201`, с `Idempotency-Key` — `200` |
+| `POST` | `/api/v1/trips` | `201`, повтор с тем же `Idempotency-Key` — `200` |
 | `GET` | `/api/v1/trips/{tripId}` | `200`           |
 | `POST` | `/api/v1/trips/{tripId}/finish` | `200`           |
 | `GET` | `/health` | `200`           |
@@ -42,6 +58,10 @@ curl -i localhost:8080/ready
 | Переменная |
 |---|
 | `HTTP_ADDR` | 
+| `HTTP_READ_HEADER_TIMEOUT` |
+| `HTTP_READ_TIMEOUT` |
+| `HTTP_WRITE_TIMEOUT` |
+| `HTTP_IDLE_TIMEOUT` |
 | `LOG_LEVEL` | 
 | `SHUTDOWN_TIMEOUT` |
 | `IDEMPOTENCY_KEY_TTL` |
@@ -59,7 +79,7 @@ curl -i localhost:8080/ready
 |---|---|
 | `make migrate` | накатить миграции goose |
 | `make run` | запустить сервис |
-| `make test` | `go test -race ./...`; в этой работе тестов нет, команда завершается успешно |
+| `make test` | `go test -race ./...` |
 | `make lint` | `golangci-lint` |
 | `make generate` | заново сгенерировать HTTP-типы и enum статуса |
 
@@ -73,7 +93,9 @@ curl -i localhost:8080/ready
 
 ### Менеджер транзакций
 
-`PostgresTxManager.Do` открывает транзакцию, кладёт `pgx.Tx` в `context` и вызывает переданную функцию с этим контекстом. Ошибка или паника приводят к `ROLLBACK`, паника после этого пробрасывается дальше. Откат вызывается с `context.WithoutCancel`, чтобы отмененный контекскт не прервал роллбэк.
+`PostgresTxManager.Do` открывает транзакцию, кладёт `pgx.Tx` в `context` и вызывает переданную функцию с этим контекстом. Ошибка или паника приводят к `ROLLBACK`, паника после этого пробрасывается дальше. Вложенный `Do` использует ту же транзакцию.
+
+У `BeginTx`, `Commit` и `Rollback` отдельные таймауты `DATABASE_QUERY_TIMEOUT`. Для отката сначала снимается отмена исходного контекста через `context.WithoutCancel`, затем устанавливается таймаут. Общего ограничения времени на весь `Do` нет; запросы репозиториев ограничены своими таймаутами.
 
 ### Одна активная поездка на водителя
 
@@ -93,8 +115,13 @@ curl -i localhost:8080/ready
 
 ```bash
 docker build -f deploy/Dockerfile -t trip-service:lab1 .
+. ./.env
+. ./.env.local
+docker_database_url="${DATABASE_URL/@localhost:/@host.docker.internal:}"
+docker_database_url="${docker_database_url/@127.0.0.1:/@host.docker.internal:}"
 docker run --rm -p 8080:8080 \
   --env-file .env \
-  -e DATABASE_URL=postgres://tripgo:tripgo@host.docker.internal:21032/tripgo?sslmode=disable \
+  --env-file .env.local \
+  -e DATABASE_URL="$docker_database_url" \
   trip-service:lab1
 ```
