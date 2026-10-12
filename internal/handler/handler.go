@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/Gtollm/TripGO/internal/domain/trip"
 	api "github.com/Gtollm/TripGO/internal/generated"
 	"github.com/Gtollm/TripGO/internal/service"
@@ -37,8 +39,16 @@ func New(trips *service.Service, ready readiness, logger *slog.Logger, queryTime
 }
 
 func (h *Handler) Routes() http.Handler {
+	router := chi.NewRouter()
+	router.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		h.writeProblem(w, r, http.StatusNotFound, "not_found", "Not found", "not-found", "Route was not found")
+	})
+	router.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		h.writeProblem(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed", "method-not-allowed", "Method is not allowed for this route")
+	})
 	return api.HandlerWithOptions(
 		h, api.ChiServerOptions{
+			BaseRouter:       router,
 			ErrorHandlerFunc: h.handleParamError,
 		},
 	)

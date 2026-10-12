@@ -62,7 +62,9 @@ func (s *Service) Create(
 			if err := s.keys.DeleteExpired(ctx, *idempotencyKey, now.Add(-s.keyTTL)); err != nil {
 				return err
 			}
-			if err := s.keys.Create(ctx, repository.IdempotencyKey{Key: *idempotencyKey, RequestHash: hash, CreatedAt: now}); err != nil {
+			if err := s.keys.Create(
+				ctx, repository.IdempotencyKey{Key: *idempotencyKey, RequestHash: hash, CreatedAt: now},
+			); err != nil {
 				return err
 			}
 			if err := s.trips.Create(ctx, created, change); err != nil {
@@ -117,22 +119,34 @@ func (s *Service) findRepeated(ctx context.Context, key uuid.UUID, hash string) 
 	if err != nil {
 		return trip.Trip{}, err
 	}
-	if stored.RequestHash != hash {
+	found, err := s.trips.Get(ctx, stored.TripID)
+	if err != nil {
+		return trip.Trip{}, err
+	}
+
+	if stored.RequestHash != hash && requestHash(found) != hash {
 		return trip.Trip{}, trip.ErrIdempotencyConflict
 	}
-	return s.trips.Get(ctx, stored.TripID)
+	return found, nil
 }
 
 func requestHash(t trip.Trip) string {
 	fields := []string{
 		t.UserID.String(),
 		t.DriverID.String(),
-		strconv.FormatFloat(t.Start.Latitude, 'g', -1, 64),
-		strconv.FormatFloat(t.Start.Longitude, 'g', -1, 64),
-		strconv.FormatFloat(t.End.Latitude, 'g', -1, 64),
-		strconv.FormatFloat(t.End.Longitude, 'g', -1, 64),
+		formatCoordinate(t.Start.Latitude),
+		formatCoordinate(t.Start.Longitude),
+		formatCoordinate(t.End.Latitude),
+		formatCoordinate(t.End.Longitude),
 		strconv.FormatInt(t.Price, 10),
 	}
 	sum := sha256.Sum256([]byte(strings.Join(fields, "|")))
 	return hex.EncodeToString(sum[:])
+}
+
+func formatCoordinate(value float64) string {
+	if value == 0 {
+		return "0"
+	}
+	return strconv.FormatFloat(value, 'g', -1, 64)
 }
