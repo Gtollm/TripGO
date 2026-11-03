@@ -1,0 +1,6 @@
+.git
+.tripgo
+.env
+.env.local
+bin
+**/*_test.go
