@@ -39,21 +39,27 @@ func New(
 	if err := validateID("id", id); err != nil {
 		return Trip{}, Transition{}, err
 	}
+
 	if err := validateID("user_id", userID); err != nil {
 		return Trip{}, Transition{}, err
 	}
+
 	if err := validateID("driver_id", driverID); err != nil {
 		return Trip{}, Transition{}, err
 	}
+
 	if err := validateCoordinates("start_point", start); err != nil {
 		return Trip{}, Transition{}, err
 	}
+
 	if err := validateCoordinates("end_point", end); err != nil {
 		return Trip{}, Transition{}, err
 	}
+
 	if err := validatePrice(price); err != nil {
 		return Trip{}, Transition{}, err
 	}
+
 	if err := validateTime("started_at", at); err != nil {
 		return Trip{}, Transition{}, err
 	}
@@ -68,12 +74,14 @@ func New(
 		Status:    StatusACTIVE,
 		StartedAt: at,
 	}
+
 	transition := Transition{
 		From:   StatusNONE,
 		To:     StatusACTIVE,
 		At:     at,
 		Reason: "created",
 	}
+
 	return created, transition, nil
 }
 
@@ -83,9 +91,11 @@ func (t *Trip) Finish(at time.Time) (Transition, error) {
 		if err := validateTime("finished_at", at); err != nil {
 			return Transition{}, err
 		}
+
 		if err := validateTimeAfter("finished_at", at, t.StartedAt); err != nil {
 			return Transition{}, err
 		}
+
 		t.Status = StatusCOMPLETED
 		t.FinishedAt = &at
 		return Transition{
@@ -97,6 +107,6 @@ func (t *Trip) Finish(at time.Time) (Transition, error) {
 	case StatusCOMPLETED:
 		return Transition{}, ErrTripCompleted
 	default:
-		return Transition{}, &TripGoError{Field: "status", Reason: "must be active"}
+		return Transition{}, &ValidationError{Field: "status", Reason: "must be active"}
 	}
 }
