@@ -69,7 +69,7 @@ func New(ctx context.Context, cfg *config.Config) (_ *Container, err error) {
 	keys := idempotency.New(c.pool, cfg.DatabaseConfig.QueryTimeout)
 	tx := transaction.New(c.pool, cfg.DatabaseConfig.QueryTimeout)
 
-	c.tripMetrics, err = telemetry.NewTripMetrics(meter, trips)
+	c.tripMetrics, err = telemetry.NewTripMetrics(meter, trips, c.Logger)
 	if err != nil {
 		return nil, err
 	}

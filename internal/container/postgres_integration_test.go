@@ -90,11 +90,11 @@ func newDatabase(t *testing.T, uri string) database {
 		tx:    transaction.New(pool, 5*time.Second),
 	}
 
-	metrics, err := telemetry.NewTripMetrics(noop.NewMeterProvider().Meter("test"), db.trips)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	metrics, err := telemetry.NewTripMetrics(noop.NewMeterProvider().Meter("test"), db.trips, logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, metrics.Close()) })
 
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	db.create = create.New(db.trips, db.keys, db.tx, metrics, logger, 24*time.Hour, time.Now)
 	db.finish = finish.New(db.trips, db.tx, metrics, logger, time.Now)
 

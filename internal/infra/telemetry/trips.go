@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"go.opentelemetry.io/otel/metric"
 )
@@ -13,7 +14,7 @@ type TripMetrics struct {
 	registration metric.Registration
 }
 
-func NewTripMetrics(meter metric.Meter, trips activeTrips) (*TripMetrics, error) {
+func NewTripMetrics(meter metric.Meter, trips activeTrips, logger *slog.Logger) (*TripMetrics, error) {
 	created, err := meter.Int64Counter("tripgo.trips.created", metric.WithUnit("{trip}"))
 	if err != nil {
 		return nil, fmt.Errorf("created metric: %w", err)
@@ -32,7 +33,8 @@ func NewTripMetrics(meter metric.Meter, trips activeTrips) (*TripMetrics, error)
 	registration, err := meter.RegisterCallback(func(ctx context.Context, observer metric.Observer) error {
 		count, err := trips.CountActive(ctx)
 		if err != nil {
-			return fmt.Errorf("observe active trips: %w", err)
+			logger.WarnContext(ctx, "observe active trips failed", "error", err)
+			return nil
 		}
 
 		observer.ObserveInt64(active, count)

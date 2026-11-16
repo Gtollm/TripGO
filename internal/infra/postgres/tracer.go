@@ -16,6 +16,18 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+const (
+	bucket1ms   = 0.001
+	bucket5ms   = 0.005
+	bucket10ms  = 0.01
+	bucket50ms  = 0.05
+	bucket100ms = 0.1
+	bucket500ms = 0.5
+	bucket1s    = 1
+	bucket5s    = 5
+	bucket10s   = 10
+)
+
 type (
 	queryKey  struct{}
 	queryInfo struct {
@@ -33,6 +45,9 @@ func NewTracer(provider trace.TracerProvider, meter metric.Meter) (*Tracer, erro
 	duration, err := meter.Float64Histogram(
 		"db.client.operation.duration",
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(
+			bucket1ms, bucket5ms, bucket10ms, bucket50ms, bucket100ms, bucket500ms, bucket1s, bucket5s, bucket10s,
+		),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("db duration metric: %w", err)
