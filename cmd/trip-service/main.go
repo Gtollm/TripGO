@@ -10,18 +10,13 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/Gtollm/TripGO/internal/config"
-	"github.com/Gtollm/TripGO/internal/handler"
-	"github.com/Gtollm/TripGO/internal/infrastructure/postgres"
-	"github.com/Gtollm/TripGO/internal/repository"
-	"github.com/Gtollm/TripGO/internal/service"
+	"github.com/Gtollm/TripGO/internal/container"
 )
 
 func main() {
 	if err := run(); err != nil {
-		slog.New(slog.NewJSONHandler(os.Stdout, nil)).Error("trip-service stopped", "error", err)
+		slog.New(slog.NewJSONHandler(os.Stdout, nil)).Error("trip-service stopped", "service", "trip-service", "error", err)
 		os.Exit(1)
 	}
 }
@@ -32,97 +27,31 @@ func run() error {
 		return err
 	}
 
-	logger, err := newLogger(cfg.LogLevel)
-	if err != nil {
-		return err
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	pool, err := newPool(ctx, cfg.DatabaseConfig)
+	app, err := container.New(ctx, cfg)
 	if err != nil {
 		return err
 	}
-
-	server := newHTTPServer(cfg, pool, logger)
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("http server listening", "addr", cfg.HttpConfig.Addr)
-		errCh <- server.ListenAndServe()
+		app.Logger.InfoContext(ctx, "service started", "addr", cfg.HttpConfig.Addr)
+		errCh <- app.Server.ListenAndServe()
 	}()
 
 	select {
-	case err := <-errCh:
-		pool.Close()
+	case err = <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+			err = nil
+		} else {
+			err = fmt.Errorf("serve http: %w", err)
 		}
-		return fmt.Errorf("serve http: %w", err)
 	case <-ctx.Done():
-		logger.Info("shutdown signal received")
+		app.Logger.InfoContext(ctx, "shutdown signal received")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown budget exceeded: %w", err)
-	}
-
-	pool.Close()
-	logger.Info("shutdown complete")
-	return nil
-}
-
-func newLogger(rawLevel string) (*slog.Logger, error) {
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(rawLevel)); err != nil {
-		return nil, fmt.Errorf("LOG_LEVEL: %w", err)
-	}
-
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})), nil
-}
-
-func newPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, error) {
-	poolCfg, err := pgxpool.ParseConfig(cfg.URL)
-	if err != nil {
-		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
-	}
-
-	poolCfg.MaxConns = cfg.MaxConnections
-	poolCfg.MinConns = cfg.MinConnections
-	poolCfg.MaxConnLifetime = cfg.MaxConnectionLifetime
-	poolCfg.ConnConfig.ConnectTimeout = cfg.ConnectTimeout
-
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
-	if err != nil {
-		return nil, fmt.Errorf("create postgres pool: %w", err)
-	}
-
-	pingCtx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
-	defer cancel()
-	if err := pool.Ping(pingCtx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("ping postgres: %w", err)
-	}
-
-	return pool, nil
-}
-
-func newHTTPServer(cfg *config.Config, pool *pgxpool.Pool, logger *slog.Logger) *http.Server {
-	repo := repository.NewPostgresRepository(pool, cfg.DatabaseConfig.QueryTimeout)
-	keys := repository.NewPostgresIdempotencyRepository(pool, cfg.DatabaseConfig.QueryTimeout)
-	trips := service.New(repo, keys, postgres.NewTxManager(pool, cfg.DatabaseConfig.QueryTimeout), cfg.IdempotencyKeyTTL)
-	httpHandler := handler.New(trips, pool, logger, cfg.DatabaseConfig.QueryTimeout)
-
-	return &http.Server{
-		Addr:              cfg.HttpConfig.Addr,
-		Handler:           httpHandler.Routes(),
-		ReadHeaderTimeout: cfg.HttpConfig.ReadHeaderTimeout,
-		ReadTimeout:       cfg.HttpConfig.ReadTimeout,
-		WriteTimeout:      cfg.HttpConfig.WriteTimeout,
-		IdleTimeout:       cfg.HttpConfig.IdleTimeout,
-	}
+	return errors.Join(err, app.Shutdown(shutdownCtx))
 }

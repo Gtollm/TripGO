@@ -1,4 +1,4 @@
-.PHONY: migrate run test lint generate
+.PHONY: migrate run test test-integration lint fmt generate test-mutation
 
 -include .env
 -include .env.local
@@ -11,7 +11,20 @@ run:
 	go run ./cmd/trip-service
 
 test:
-	go test -race ./...
+	@set -eu; coverage=$$(mktemp); trap 'rm -f "$$coverage"' EXIT; \
+	go test -race -count=2 -coverprofile="$$coverage" ./...; \
+	go tool cover -func="$$coverage"
+
+test-integration:
+	go test -race -count=2 -tags=integration ./...
+
+test-mutation:
+	go tool gremlins unleash . --workers 2 \
+	  -E '(^|/)(cmd|config|container|generated|http|infra|model|repository)/' \
+	  -E 'enums.enum.go' -S lc
+
+fmt:
+	golangci-lint fmt
 
 lint:
 	golangci-lint run ./...
@@ -23,4 +36,4 @@ generate:
       -include-operation-ids createTrip,getTrip,finishTrip,health,ready \
       -o internal/generated/api.gen.go \
       contracts/openapi/trip-service.openapi.yaml
-	go generate ./internal/domain/trip/
+	go generate ./internal/...
