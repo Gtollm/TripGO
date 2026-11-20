@@ -172,6 +172,7 @@ func (r *Repository) get(ctx context.Context, id uuid.UUID, forUpdate bool) (mod
 		"status",
 		"started_at",
 		"finished_at",
+		"last_position_at",
 	).
 		From("trips").
 		Where(sq.Eq{"id": id})
@@ -200,6 +201,7 @@ func (r *Repository) get(ctx context.Context, id uuid.UUID, forUpdate bool) (mod
 		&statusText,
 		&found.StartedAt,
 		&found.FinishedAt,
+		&found.LastPositionAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Trip{}, domain.ErrTripNotFound
@@ -232,6 +234,72 @@ func (r *Repository) CountActive(ctx context.Context) (int64, error) {
 	}
 
 	return count, nil
+}
+
+func (r *Repository) UpdateLastPositionAt(ctx context.Context, tripID uuid.UUID, recordedAt, updatedAt time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
+	query, args, err := statement.Update("trips").
+		Set("last_position_at", sq.Expr("GREATEST(last_position_at, ?)", recordedAt)).
+		Set("updated_at", updatedAt).
+		Where(sq.Eq{"id": tripID}).
+		Where(sq.Expr("(last_position_at IS NULL OR last_position_at < ?)", recordedAt)).
+		ToSql()
+	if err != nil {
+		return fmt.Errorf("build update trip last position at query: %w", err)
+	}
+
+	if _, err := transaction.FromContext(ctx, r.pool).Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("update trip last position at: %w", err)
+	}
+
+	return nil
+}
+
+func (r *Repository) ListStaleBatch(
+	ctx context.Context,
+	staleAfter time.Duration,
+	cursor *model.StaleCursor,
+	limit int,
+) ([]model.StaleTrip, error) {
+	if limit <= 0 {
+		return nil, errors.New("list stale trips batch: limit must be positive")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
+	builder := statement.Select("id", "driver_id", "COALESCE(last_position_at, started_at)").
+		From("trips").
+		Where("status = 'active'").
+		Where(sq.Expr("COALESCE(last_position_at, started_at) < now() - ?::interval", staleAfter)).
+		OrderBy("COALESCE(last_position_at, started_at) ASC", "id ASC").
+		Limit(uint64(limit))
+	if cursor != nil {
+		builder = builder.Where(sq.Expr("(COALESCE(last_position_at, started_at), id) > (?, ?)", cursor.LastActiveAt, cursor.TripID))
+	}
+
+	query, args, err := builder.ToSql()
+	if err != nil {
+		return nil, fmt.Errorf("build list stale trips batch query: %w", err)
+	}
+
+	rows, err := transaction.FromContext(ctx, r.pool).Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list stale trips batch: %w", err)
+	}
+
+	stale, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.StaleTrip, error) {
+		var item model.StaleTrip
+		err := row.Scan(&item.TripID, &item.DriverID, &item.LastActiveAt)
+		return item, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan stale trips: %w", err)
+	}
+
+	return stale, nil
 }
 
 func historyStatus(status domain.Status) any {

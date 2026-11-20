@@ -37,6 +37,16 @@ func environment(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
 		"OTEL_TRACES_SAMPLER":         "parentbased_always_on",
 		"OTEL_TRACES_SAMPLER_ARG":     "",
+		"PUSH_HTTP_URL":               "http://localhost:8090",
+		"PUSH_REQUEST_TIMEOUT":        "",
+		"PUSH_KEEP_ALIVE":             "",
+		"PUSH_MAX_IDLE_CONNS":         "",
+		"PUSH_IDLE_CONN_TIMEOUT":      "",
+		"POSITION_CHECK_INTERVAL":     "",
+		"POSITION_STALE_AFTER":        "",
+		"POSITION_WORKERS":            "",
+		"POSITION_QUEUE_SIZE":         "",
+		"POSITION_SCAN_BATCH_SIZE":    "",
 	} {
 		t.Setenv(name, value)
 	}
@@ -50,14 +60,28 @@ func TestLoad(t *testing.T) {
 	require.Equal(t, 24*time.Hour, cfg.IdempotencyKeyTTL)
 	require.EqualValues(t, 10, cfg.DatabaseConfig.MaxConnections)
 	require.Equal(t, "http/protobuf", cfg.Telemetry.Protocol)
+	require.Equal(t, "http://localhost:8090", cfg.Push.HTTPURL)
+	require.Equal(t, time.Second, cfg.Push.RequestTimeout)
+	require.Equal(t, 30*time.Second, cfg.Push.KeepAlive)
+	require.Equal(t, 100, cfg.Push.MaxIdleConns)
+	require.Equal(t, 90*time.Second, cfg.Push.IdleConnTimeout)
+	require.Equal(t, 30*time.Second, cfg.PositionWorker.CheckInterval)
+	require.Equal(t, 60*time.Second, cfg.PositionWorker.StaleAfter)
+	require.Equal(t, 4, cfg.PositionWorker.Workers)
+	require.Equal(t, 100, cfg.PositionWorker.QueueSize)
+	require.Equal(t, 100, cfg.PositionWorker.ScanBatchSize)
 
 	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
 	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
 	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "0.25")
+	t.Setenv("PUSH_REQUEST_TIMEOUT", "2s")
+	t.Setenv("POSITION_WORKERS", "8")
 
 	cfg, err = config.Load()
 	require.NoError(t, err)
 	require.Equal(t, 0.25, cfg.Telemetry.SamplerRatio)
+	require.Equal(t, 2*time.Second, cfg.Push.RequestTimeout)
+	require.Equal(t, 8, cfg.PositionWorker.Workers)
 }
 
 func TestRejectInvalidConfig(t *testing.T) {
@@ -74,6 +98,14 @@ func TestRejectInvalidConfig(t *testing.T) {
 		{"OTEL_EXPORTER_OTLP_PROTOCOL", invalidValue},
 		{"OTEL_TRACES_SAMPLER", invalidValue},
 		{"OTEL_SERVICE_NAME", ""},
+		{"PUSH_HTTP_URL", ""},
+		{"PUSH_KEEP_ALIVE", "0s"},
+		{"PUSH_MAX_IDLE_CONNS", "0"},
+		{"PUSH_IDLE_CONN_TIMEOUT", invalidValue},
+		{"POSITION_CHECK_INTERVAL", "0s"},
+		{"POSITION_STALE_AFTER", invalidValue},
+		{"POSITION_QUEUE_SIZE", "0"},
+		{"POSITION_SCAN_BATCH_SIZE", invalidValue},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			environment(t)

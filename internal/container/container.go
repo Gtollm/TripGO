@@ -13,8 +13,11 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/Gtollm/TripGO/internal/config"
+	"github.com/Gtollm/TripGO/internal/gateway/push"
 	transport "github.com/Gtollm/TripGO/internal/http"
 	"github.com/Gtollm/TripGO/internal/http/middleware"
+	createpositionhttp "github.com/Gtollm/TripGO/internal/http/position/create"
+	listpositionshttp "github.com/Gtollm/TripGO/internal/http/position/list"
 	"github.com/Gtollm/TripGO/internal/http/ready"
 	createhttp "github.com/Gtollm/TripGO/internal/http/trip/create"
 	finishhttp "github.com/Gtollm/TripGO/internal/http/trip/finish"
@@ -23,18 +26,25 @@ import (
 	"github.com/Gtollm/TripGO/internal/infra/postgres/transaction"
 	"github.com/Gtollm/TripGO/internal/infra/telemetry"
 	"github.com/Gtollm/TripGO/internal/repository/idempotency"
+	positionrepo "github.com/Gtollm/TripGO/internal/repository/position"
 	"github.com/Gtollm/TripGO/internal/repository/trip"
+	createposition "github.com/Gtollm/TripGO/internal/usecase/position/create"
+	listpositions "github.com/Gtollm/TripGO/internal/usecase/position/list"
 	"github.com/Gtollm/TripGO/internal/usecase/trip/create"
 	"github.com/Gtollm/TripGO/internal/usecase/trip/finish"
 	"github.com/Gtollm/TripGO/internal/usecase/trip/get"
+	"github.com/Gtollm/TripGO/internal/worker/positions"
 )
 
 type Container struct {
-	Server      *http.Server
-	Logger      *slog.Logger
-	pool        *pgxpool.Pool
-	telemetry   *telemetry.Telemetry
-	tripMetrics *telemetry.TripMetrics
+	Server          *http.Server
+	Logger          *slog.Logger
+	PositionWorker  *positions.Pool
+	pool            *pgxpool.Pool
+	pushGateway     *push.Client
+	telemetry       *telemetry.Telemetry
+	tripMetrics     *telemetry.TripMetrics
+	positionMetrics *telemetry.PositionMetrics
 }
 
 func New(ctx context.Context, cfg *config.Config) (_ *Container, err error) {
@@ -66,6 +76,7 @@ func New(ctx context.Context, cfg *config.Config) (_ *Container, err error) {
 	}
 
 	trips := trip.New(c.pool, cfg.DatabaseConfig.QueryTimeout)
+	positionsRepo := positionrepo.New(c.pool, cfg.DatabaseConfig.QueryTimeout)
 	keys := idempotency.New(c.pool, cfg.DatabaseConfig.QueryTimeout)
 	tx := transaction.New(c.pool, cfg.DatabaseConfig.QueryTimeout)
 
@@ -74,14 +85,37 @@ func New(ctx context.Context, cfg *config.Config) (_ *Container, err error) {
 		return nil, err
 	}
 
+	c.positionMetrics, err = telemetry.NewPositionMetrics(meter)
+	if err != nil {
+		return nil, err
+	}
+
+	propagator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+	c.pushGateway = push.New(cfg.Push, c.telemetry.Traces, propagator)
+
+	c.PositionWorker = positions.New(
+		trips,
+		c.pushGateway,
+		c.positionMetrics,
+		c.telemetry.Traces,
+		c.Logger,
+		cfg.PositionWorker,
+		cfg.Push.RequestTimeout,
+		positions.NewTicker,
+	)
+
 	createTrip := create.New(trips, keys, tx, c.tripMetrics, c.Logger, cfg.IdempotencyKeyTTL, time.Now)
 	finishTrip := finish.New(trips, tx, c.tripMetrics, c.Logger, time.Now)
 	getTrip := get.New(trips)
+	createPos := createposition.New(trips, positionsRepo, tx, c.PositionWorker, c.tripMetrics, c.Logger, time.Now)
+	listPos := listpositions.New(trips, positionsRepo)
 
 	router := transport.NewRouter(
 		createhttp.New(createTrip),
 		gethttp.New(getTrip),
 		finishhttp.New(finishTrip),
+		createpositionhttp.New(createPos),
+		listpositionshttp.New(listPos),
 		ready.New(c.pool, cfg.DatabaseConfig.QueryTimeout),
 	)
 
@@ -90,7 +124,6 @@ func New(ctx context.Context, cfg *config.Config) (_ *Container, err error) {
 		return nil, err
 	}
 
-	propagator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
 	handler := middleware.Recover(c.Logger)(middleware.Tracing(c.telemetry.Traces, propagator, router)(
 		middleware.Logging(c.Logger)(metrics.Wrap(router)),
 	))
@@ -109,10 +142,23 @@ func New(ctx context.Context, cfg *config.Config) (_ *Container, err error) {
 
 func (c *Container) Shutdown(ctx context.Context) error {
 	var result error
+
 	if c.Server != nil {
 		if err := c.Server.Shutdown(ctx); err != nil {
 			result = errors.Join(result, fmt.Errorf("shutdown http: %w", err), c.Server.Close())
 		}
+	}
+
+	if c.PositionWorker != nil {
+		result = errors.Join(result, c.PositionWorker.Shutdown(ctx))
+	}
+
+	if c.pushGateway != nil {
+		c.pushGateway.Close()
+	}
+
+	if c.positionMetrics != nil {
+		result = errors.Join(result, c.positionMetrics.Close())
 	}
 
 	if c.tripMetrics != nil {

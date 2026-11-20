@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,20 +30,47 @@ import (
 	"github.com/Gtollm/TripGO/internal/infra/telemetry"
 	"github.com/Gtollm/TripGO/internal/model"
 	"github.com/Gtollm/TripGO/internal/repository/idempotency"
+	positionrepo "github.com/Gtollm/TripGO/internal/repository/position"
 	"github.com/Gtollm/TripGO/internal/repository/trip"
+	createposition "github.com/Gtollm/TripGO/internal/usecase/position/create"
+	listpositions "github.com/Gtollm/TripGO/internal/usecase/position/list"
 	"github.com/Gtollm/TripGO/internal/usecase/trip/create"
 	"github.com/Gtollm/TripGO/internal/usecase/trip/finish"
 )
 
 const postgresImage = "docker.io/library/postgres"
 
+type recordingCanceller struct {
+	mu  sync.Mutex
+	ids []uuid.UUID
+}
+
+func (c *recordingCanceller) Cancel(_ context.Context, tripID uuid.UUID) {
+	c.mu.Lock()
+	c.ids = append(c.ids, tripID)
+	c.mu.Unlock()
+}
+
+func (c *recordingCanceller) Calls() []uuid.UUID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]uuid.UUID, len(c.ids))
+	copy(out, c.ids)
+	return out
+}
+
 type database struct {
-	pool   *pgxpool.Pool
-	trips  *trip.Repository
-	keys   *idempotency.Repository
-	tx     *transaction.Manager
-	create *create.UseCase
-	finish *finish.UseCase
+	pool      *pgxpool.Pool
+	trips     *trip.Repository
+	positions *positionrepo.Repository
+	keys      *idempotency.Repository
+	tx        *transaction.Manager
+	canceller *recordingCanceller
+	metrics   *telemetry.TripMetrics
+	create    *create.UseCase
+	finish    *finish.UseCase
+	createPos *createposition.UseCase
+	listPos   *listpositions.UseCase
 }
 
 func newDatabase(t *testing.T, uri string) database {
@@ -84,10 +113,12 @@ func newDatabase(t *testing.T, uri string) database {
 	require.NoError(t, sqlDB.Close())
 
 	db := database{
-		pool:  pool,
-		trips: trip.New(pool, 5*time.Second),
-		keys:  idempotency.New(pool, 5*time.Second),
-		tx:    transaction.New(pool, 5*time.Second),
+		pool:      pool,
+		trips:     trip.New(pool, 5*time.Second),
+		positions: positionrepo.New(pool, 5*time.Second),
+		keys:      idempotency.New(pool, 5*time.Second),
+		tx:        transaction.New(pool, 5*time.Second),
+		canceller: &recordingCanceller{},
 	}
 
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -95,8 +126,11 @@ func newDatabase(t *testing.T, uri string) database {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, metrics.Close()) })
 
+	db.metrics = metrics
 	db.create = create.New(db.trips, db.keys, db.tx, metrics, logger, 24*time.Hour, time.Now)
 	db.finish = finish.New(db.trips, db.tx, metrics, logger, time.Now)
+	db.createPos = createposition.New(db.trips, db.positions, db.tx, db.canceller, metrics, logger, time.Now)
+	db.listPos = listpositions.New(db.trips, db.positions)
 
 	return db
 }
@@ -127,13 +161,15 @@ func TestPostgres(t *testing.T) {
 	}
 
 	for name, test := range map[string]func(*testing.T, database){
-		"trip lifecycle":         testLifecycle,
-		"rollback second insert": testCreateRollback,
-		"transaction cleanup":    testTransactionCleanup,
-		"concurrent create":      testConcurrentCreate,
-		"concurrent finish":      testConcurrentFinish,
-		"concurrent idempotency": testConcurrentIdempotency,
-		"expired idempotency":    testExpiredIdempotency,
+		"trip lifecycle":                  testLifecycle,
+		"rollback second insert":          testCreateRollback,
+		"transaction cleanup":             testTransactionCleanup,
+		"concurrent create":               testConcurrentCreate,
+		"concurrent finish":               testConcurrentFinish,
+		"concurrent idempotency":          testConcurrentIdempotency,
+		"expired idempotency":             testExpiredIdempotency,
+		"list stale trips and batching":   testListStaleTrips,
+		"position lifecycle and rollback": testPositionLifecycleAndRollback,
 	} {
 		t.Run(name, func(t *testing.T) { test(t, newDatabase(t, uri)) })
 	}
@@ -391,4 +427,164 @@ func testExpiredIdempotency(t *testing.T, db database) {
 	stored, err := db.keys.Get(t.Context(), key)
 	require.NoError(t, err)
 	require.Equal(t, second.Trip.ID, stored.TripID)
+}
+
+type failingLastPositionTrips struct {
+	*trip.Repository
+	err error
+}
+
+func (f failingLastPositionTrips) UpdateLastPositionAt(context.Context, uuid.UUID, time.Time, time.Time) error {
+	return f.err
+}
+
+func testPositionLifecycleAndRollback(t *testing.T, db database) {
+	ctx := t.Context()
+	created, err := db.create.Run(ctx, createInput())
+	require.NoError(t, err)
+	tripID := created.Trip.ID
+
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	t1 := base.Add(-20 * time.Second)
+	t2 := base.Add(-5 * time.Second)
+
+	p2, err := db.createPos.Run(ctx, model.CreatePosition{
+		TripID:      tripID,
+		Coordinates: domain.Coordinates{Latitude: 59.935, Longitude: 30.335},
+		RecordedAt:  t2,
+	})
+	require.NoError(t, err)
+
+	storedTrip, err := db.trips.Get(ctx, tripID)
+	require.NoError(t, err)
+	require.NotNil(t, storedTrip.LastPositionAt)
+	require.True(t, t2.Equal(*storedTrip.LastPositionAt))
+	require.Equal(t, []uuid.UUID{tripID}, db.canceller.Calls())
+
+	p1, err := db.createPos.Run(ctx, model.CreatePosition{
+		TripID:      tripID,
+		Coordinates: domain.Coordinates{Latitude: 59.931, Longitude: 30.331},
+		RecordedAt:  t1,
+	})
+	require.NoError(t, err)
+
+	storedTrip, err = db.trips.Get(ctx, tripID)
+	require.NoError(t, err)
+	require.NotNil(t, storedTrip.LastPositionAt)
+	require.True(t, t2.Equal(*storedTrip.LastPositionAt))
+
+	p1Tie, err := db.createPos.Run(ctx, model.CreatePosition{
+		TripID:      tripID,
+		Coordinates: domain.Coordinates{Latitude: 59.932, Longitude: 30.332},
+		RecordedAt:  t1,
+	})
+	require.NoError(t, err)
+
+	route, err := db.listPos.Run(ctx, model.ListPositions{TripID: tripID})
+	require.NoError(t, err)
+	require.Len(t, route.Positions, 3)
+	require.Equal(t, []int64{p1.Position.ID, p1Tie.Position.ID, p2.Position.ID}, []int64{
+		route.Positions[0].ID, route.Positions[1].ID, route.Positions[2].ID,
+	})
+
+	rollbackErr := errors.New("forced update last_position_at failure")
+	failingUseCase := createposition.New(
+		failingLastPositionTrips{Repository: db.trips, err: rollbackErr},
+		db.positions,
+		db.tx,
+		db.canceller,
+		db.metrics,
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		time.Now,
+	)
+	_, err = failingUseCase.Run(ctx, model.CreatePosition{
+		TripID:      tripID,
+		Coordinates: domain.Coordinates{Latitude: 59.94, Longitude: 30.34},
+		RecordedAt:  base,
+	})
+	require.ErrorIs(t, err, rollbackErr)
+
+	routeAfterRollback, err := db.listPos.Run(ctx, model.ListPositions{TripID: tripID})
+	require.NoError(t, err)
+	require.Len(t, routeAfterRollback.Positions, 3)
+
+	storedTrip, err = db.trips.Get(ctx, tripID)
+	require.NoError(t, err)
+	require.NotNil(t, storedTrip.LastPositionAt)
+	require.True(t, t2.Equal(*storedTrip.LastPositionAt))
+
+	_, err = db.finish.Run(ctx, model.FinishTrip{ID: tripID})
+	require.NoError(t, err)
+
+	_, err = db.createPos.Run(ctx, model.CreatePosition{
+		TripID:      tripID,
+		Coordinates: domain.Coordinates{Latitude: 59.95, Longitude: 30.35},
+		RecordedAt:  base,
+	})
+	require.ErrorIs(t, err, domain.ErrTripCompleted)
+
+	routeAfterFinish, err := db.listPos.Run(ctx, model.ListPositions{TripID: tripID})
+	require.NoError(t, err)
+	require.Len(t, routeAfterFinish.Positions, 3)
+}
+
+func testListStaleTrips(t *testing.T, db database) {
+	ctx := t.Context()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	insertTrip := func(id uuid.UUID, status string, startedAt time.Time, finishedAt, lastPosAt *time.Time) {
+		_, err := db.pool.Exec(ctx, `
+INSERT INTO trips (
+	id, user_id, driver_id,
+	start_latitude, start_longitude, end_latitude, end_longitude,
+	price, status, started_at, finished_at, last_position_at
+) VALUES ($1, $2, $3, 59.9, 30.3, 59.95, 30.35, 1000, $4, $5, $6, $7)`,
+			id, uuid.New(), uuid.New(), status, startedAt, finishedAt, lastPosAt,
+		)
+		require.NoError(t, err)
+	}
+
+	stalePosTime := now.Add(-10 * time.Minute)
+	staleNoPosID := uuid.New()
+	stalePosID := uuid.New()
+	freshNoPosID := uuid.New()
+	freshPosID := uuid.New()
+	completedID := uuid.New()
+
+	insertTrip(stalePosID, "active", now.Add(-20*time.Minute), nil, &stalePosTime)
+	insertTrip(staleNoPosID, "active", now.Add(-5*time.Minute), nil, nil)
+	insertTrip(freshNoPosID, "active", now.Add(-10*time.Second), nil, nil)
+	freshPosTime := now.Add(-10 * time.Second)
+	insertTrip(freshPosID, "active", now.Add(-20*time.Minute), nil, &freshPosTime)
+	finishedAt := now.Add(-15 * time.Minute)
+	completedPosTime := now.Add(-25 * time.Minute)
+	insertTrip(completedID, "completed", now.Add(-30*time.Minute), &finishedAt, &completedPosTime)
+
+	tieTime := now.Add(-3 * time.Minute)
+	tieIDs := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	sort.Slice(tieIDs, func(i, j int) bool { return tieIDs[i].String() < tieIDs[j].String() })
+	for _, id := range tieIDs {
+		insertTrip(id, "active", now.Add(-10*time.Minute), nil, &tieTime)
+	}
+
+	var got []uuid.UUID
+	var cursor *model.StaleCursor
+	batches := 0
+	for {
+		batch, err := db.trips.ListStaleBatch(ctx, time.Minute, cursor, 2)
+		require.NoError(t, err)
+		batches++
+		for _, item := range batch {
+			got = append(got, item.TripID)
+		}
+		if len(batch) < 2 {
+			break
+		}
+		last := batch[len(batch)-1]
+		cursor = &model.StaleCursor{LastActiveAt: last.LastActiveAt, TripID: last.TripID}
+	}
+
+	want := append([]uuid.UUID{stalePosID, staleNoPosID}, tieIDs...)
+	require.Equal(t, want, got)
+	require.Equal(t, 3, batches)
 }

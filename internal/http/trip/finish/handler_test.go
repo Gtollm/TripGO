@@ -35,7 +35,7 @@ func TestHandler(t *testing.T) {
 			id := uuid.New()
 			item := model.Trip{ID: id, Status: trip.StatusACTIVE}
 			u.EXPECT().Run(gomock.Any(), model.FinishTrip{ID: id}).Return(model.FinishTripResult{Trip: item}, tc.failure)
-			router := transport.NewRouter(nil, nil, finish.New(u), nil)
+			router := transport.NewRouter(nil, nil, finish.New(u), nil, nil, nil)
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/trips/"+id.String()+"/finish", nil))
 			require.Equal(t, tc.status, response.Code)

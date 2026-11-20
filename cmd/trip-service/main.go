@@ -27,16 +27,20 @@ func run() error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	appCtx := context.Background()
+	ctx, stop := signal.NotifyContext(appCtx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
 	app, err := container.New(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
+	app.PositionWorker.Start(appCtx)
+
 	errCh := make(chan error, 1)
 	go func() {
-		app.Logger.InfoContext(ctx, "service started", "addr", cfg.HttpConfig.Addr)
+		app.Logger.InfoContext(appCtx, "service started", "addr", cfg.HttpConfig.Addr)
 		errCh <- app.Server.ListenAndServe()
 	}()
 

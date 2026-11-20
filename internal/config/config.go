@@ -17,6 +17,8 @@ type Config struct {
 	DatabaseConfig DatabaseConfig
 	HttpConfig     HttpConfig
 	Telemetry      TelemetryConfig
+	Push           PushConfig
+	PositionWorker PositionWorkerConfig
 }
 
 type DatabaseConfig struct {
@@ -44,6 +46,22 @@ type TelemetryConfig struct {
 	SamplerRatio float64
 }
 
+type PushConfig struct {
+	HTTPURL         string
+	RequestTimeout  time.Duration
+	KeepAlive       time.Duration
+	MaxIdleConns    int
+	IdleConnTimeout time.Duration
+}
+
+type PositionWorkerConfig struct {
+	CheckInterval time.Duration
+	StaleAfter    time.Duration
+	Workers       int
+	QueueSize     int
+	ScanBatchSize int
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{}
 	if err := loadFromEnv(cfg); err != nil {
@@ -52,6 +70,16 @@ func Load() (*Config, error) {
 
 	var err error
 	cfg.Telemetry, err = loadTelemetry()
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.Push, err = loadPush()
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.PositionWorker, err = loadPositionWorker()
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +207,14 @@ func requiredDuration(name string) (time.Duration, error) {
 	return d, nil
 }
 
+func durationOrDefault(name string, fallback time.Duration) (time.Duration, error) {
+	if os.Getenv(name) == "" {
+		return fallback, nil
+	}
+
+	return requiredDuration(name)
+}
+
 func requiredPositiveInt32(name string) (int32, error) {
 	raw, err := requiredEnv(name)
 	if err != nil {
@@ -195,6 +231,19 @@ func requiredPositiveInt32(name string) (int32, error) {
 	}
 
 	return int32(n), nil
+}
+
+func positiveIntOrDefault(name string, fallback int) (int, error) {
+	if os.Getenv(name) == "" {
+		return fallback, nil
+	}
+
+	n, err := requiredPositiveInt32(name)
+	if err != nil {
+		return 0, err
+	}
+
+	return int(n), nil
 }
 
 func loadTelemetry() (TelemetryConfig, error) {
@@ -237,6 +286,63 @@ func loadTelemetry() (TelemetryConfig, error) {
 		}
 	default:
 		return cfg, fmt.Errorf("unsupported OTEL_TRACES_SAMPLER %q", cfg.Sampler)
+	}
+
+	return cfg, nil
+}
+
+func loadPush() (PushConfig, error) {
+	var cfg PushConfig
+	var err error
+	if cfg.HTTPURL, err = requiredEnv("PUSH_HTTP_URL"); err != nil {
+		return cfg, err
+	}
+
+	endpoint, err := url.Parse(cfg.HTTPURL)
+	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+		return cfg, fmt.Errorf("PUSH_HTTP_URL must be an HTTP or HTTPS URL")
+	}
+
+	if cfg.RequestTimeout, err = durationOrDefault("PUSH_REQUEST_TIMEOUT", time.Second); err != nil {
+		return cfg, err
+	}
+
+	if cfg.KeepAlive, err = durationOrDefault("PUSH_KEEP_ALIVE", 30*time.Second); err != nil {
+		return cfg, err
+	}
+
+	if cfg.MaxIdleConns, err = positiveIntOrDefault("PUSH_MAX_IDLE_CONNS", 100); err != nil {
+		return cfg, err
+	}
+
+	if cfg.IdleConnTimeout, err = durationOrDefault("PUSH_IDLE_CONN_TIMEOUT", 90*time.Second); err != nil {
+		return cfg, err
+	}
+
+	return cfg, nil
+}
+
+func loadPositionWorker() (PositionWorkerConfig, error) {
+	var cfg PositionWorkerConfig
+	var err error
+	if cfg.CheckInterval, err = durationOrDefault("POSITION_CHECK_INTERVAL", 30*time.Second); err != nil {
+		return cfg, err
+	}
+
+	if cfg.StaleAfter, err = durationOrDefault("POSITION_STALE_AFTER", 60*time.Second); err != nil {
+		return cfg, err
+	}
+
+	if cfg.Workers, err = positiveIntOrDefault("POSITION_WORKERS", 4); err != nil {
+		return cfg, err
+	}
+
+	if cfg.QueueSize, err = positiveIntOrDefault("POSITION_QUEUE_SIZE", 100); err != nil {
+		return cfg, err
+	}
+
+	if cfg.ScanBatchSize, err = positiveIntOrDefault("POSITION_SCAN_BATCH_SIZE", 100); err != nil {
+		return cfg, err
 	}
 
 	return cfg, nil
