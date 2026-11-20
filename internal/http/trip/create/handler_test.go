@@ -53,7 +53,7 @@ func TestCreate(t *testing.T) {
 				require.Equal(t, trip.Coordinates{Latitude: 90, Longitude: 180}, input.End)
 				return model.CreatedTrip{Trip: item, Repeated: tc.repeated}, tc.failure
 			})
-			router := transport.NewRouter(create.New(u), nil, nil, nil)
+			router := transport.NewRouter(create.New(u), nil, nil, nil, nil, nil)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(validBody))
 			req.Header.Set("Idempotency-Key", key.String())
 			response := httptest.NewRecorder()
@@ -104,7 +104,7 @@ func TestInvalidBody(t *testing.T) {
 			t.Parallel()
 
 			u := NewMockusecase(gomock.NewController(t))
-			router := transport.NewRouter(create.New(u), nil, nil, nil)
+			router := transport.NewRouter(create.New(u), nil, nil, nil, nil, nil)
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(tc.body)))
 			require.Equal(t, 400, response.Code)
@@ -127,7 +127,7 @@ func TestInvalidKey(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(validBody))
 			req.Header["Idempotency-Key"] = keys
 			response := httptest.NewRecorder()
-			transport.NewRouter(create.New(u), nil, nil, nil).ServeHTTP(response, req)
+			transport.NewRouter(create.New(u), nil, nil, nil, nil, nil).ServeHTTP(response, req)
 			require.Equal(t, 400, response.Code)
 			require.Contains(t, response.Body.String(), "invalid_request")
 		})

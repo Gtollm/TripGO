@@ -12,15 +12,16 @@ type Coordinates struct {
 }
 
 type Trip struct {
-	ID         uuid.UUID
-	UserID     uuid.UUID
-	DriverID   uuid.UUID
-	Start      Coordinates
-	End        Coordinates
-	Price      int64
-	Status     Status
-	StartedAt  time.Time
-	FinishedAt *time.Time
+	ID             uuid.UUID
+	UserID         uuid.UUID
+	DriverID       uuid.UUID
+	Start          Coordinates
+	End            Coordinates
+	Price          int64
+	Status         Status
+	StartedAt      time.Time
+	FinishedAt     *time.Time
+	LastPositionAt *time.Time
 }
 
 type Transition struct {
@@ -85,28 +86,36 @@ func New(
 	return created, transition, nil
 }
 
-func (t *Trip) Finish(at time.Time) (Transition, error) {
+func (t *Trip) EnsureActive() error {
 	switch t.Status {
 	case StatusACTIVE:
-		if err := validateTime("finished_at", at); err != nil {
-			return Transition{}, err
-		}
-
-		if err := validateTimeAfter("finished_at", at, t.StartedAt); err != nil {
-			return Transition{}, err
-		}
-
-		t.Status = StatusCOMPLETED
-		t.FinishedAt = &at
-		return Transition{
-			From:   StatusACTIVE,
-			To:     StatusCOMPLETED,
-			At:     at,
-			Reason: "finished",
-		}, nil
+		return nil
 	case StatusCOMPLETED:
-		return Transition{}, ErrTripCompleted
+		return ErrTripCompleted
 	default:
-		return Transition{}, &ValidationError{Field: "status", Reason: "must be active"}
+		return &ValidationError{Field: "status", Reason: "must be active"}
 	}
+}
+
+func (t *Trip) Finish(at time.Time) (Transition, error) {
+	if err := t.EnsureActive(); err != nil {
+		return Transition{}, err
+	}
+
+	if err := validateTime("finished_at", at); err != nil {
+		return Transition{}, err
+	}
+
+	if err := validateTimeAfter("finished_at", at, t.StartedAt); err != nil {
+		return Transition{}, err
+	}
+
+	t.Status = StatusCOMPLETED
+	t.FinishedAt = &at
+	return Transition{
+		From:   StatusACTIVE,
+		To:     StatusCOMPLETED,
+		At:     at,
+		Reason: "finished",
+	}, nil
 }

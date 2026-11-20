@@ -93,7 +93,7 @@ func collectionName(sql string) string {
 		case "FROM", "INTO", "UPDATE":
 			table := strings.ToLower(strings.Trim(words[i+1], `"`))
 			switch table {
-			case "trips", "trip_status_history", "idempotency_keys":
+			case "trips", "trip_status_history", "idempotency_keys", "trip_positions":
 				return table
 			}
 		}

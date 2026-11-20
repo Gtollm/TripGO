@@ -39,15 +39,16 @@ type FinishTripResult struct {
 }
 
 type Trip struct {
-	ID         uuid.UUID
-	UserID     uuid.UUID
-	DriverID   uuid.UUID
-	Start      trip.Coordinates
-	End        trip.Coordinates
-	Price      int64
-	Status     trip.Status
-	StartedAt  time.Time
-	FinishedAt *time.Time
+	ID             uuid.UUID
+	UserID         uuid.UUID
+	DriverID       uuid.UUID
+	Start          trip.Coordinates
+	End            trip.Coordinates
+	Price          int64
+	Status         trip.Status
+	StartedAt      time.Time
+	FinishedAt     *time.Time
+	LastPositionAt *time.Time
 }
 
 type Transition struct {
@@ -62,4 +63,15 @@ type IdempotencyKey struct {
 	RequestHash string
 	TripID      uuid.UUID
 	CreatedAt   time.Time
+}
+
+type StaleTrip struct {
+	TripID       uuid.UUID
+	DriverID     uuid.UUID
+	LastActiveAt time.Time
+}
+
+type StaleCursor struct {
+	LastActiveAt time.Time
+	TripID       uuid.UUID
 }

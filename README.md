@@ -52,6 +52,8 @@ curl -i localhost:8080/ready
 | `POST` | `/api/v1/trips` | `201`, повтор с тем же ключом и телом - `200` |
 | `GET` | `/api/v1/trips/{tripId}` | `200` |
 | `POST` | `/api/v1/trips/{tripId}/finish` | `200` |
+| `POST` | `/api/v1/trips/{tripId}/positions` | `201` |
+| `GET` | `/api/v1/trips/{tripId}/positions` | `200` |
 | `GET` | `/health` | `200` |
 | `GET` | `/ready` | `200` или `503` |
 
@@ -65,6 +67,21 @@ curl -i localhost:8080/ready
 | Приложение | `LOG_LEVEL`, `SHUTDOWN_TIMEOUT`, `IDEMPOTENCY_KEY_TTL` |
 | PostgreSQL | `DATABASE_URL`, `DATABASE_MAX_CONNS`, `DATABASE_MIN_CONNS`, `DATABASE_MAX_CONN_LIFETIME`, `DATABASE_CONNECT_TIMEOUT`, `DATABASE_QUERY_TIMEOUT` |
 | OpenTelemetry | `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_TRACES_SAMPLER` |
+| Push Service | `PUSH_HTTP_URL` |
+
+Необязательные настройки опроса и HTTP-клиента Push Service (все значения должны быть больше нуля):
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `POSITION_CHECK_INTERVAL` | `30s` | период проверки устаревших поездок |
+| `POSITION_STALE_AFTER` | `60s` | порог молчания поездки по координатам |
+| `POSITION_WORKERS` | `4` | число воркеров пула |
+| `POSITION_QUEUE_SIZE` | `100` | размер очереди задач |
+| `POSITION_SCAN_BATCH_SIZE` | `100` | размер порции выборки из БД |
+| `PUSH_REQUEST_TIMEOUT` | `1s` | таймаут HTTP-запроса в Push Service |
+| `PUSH_KEEP_ALIVE` | `30s` | TCP keep-alive соединения к Push Service |
+| `PUSH_MAX_IDLE_CONNS` | `100` | максимум idle-соединений пула |
+| `PUSH_IDLE_CONN_TIMEOUT` | `90s` | время жизни idle-соединения пула |
 
 Дополнительно можно задать `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_TRACES_SAMPLER_ARG` для ratio-сэмплера, `OTEL_EXPORTER_OTLP_TIMEOUT` и `OTEL_METRIC_EXPORT_INTERVAL`. Последние две настройки задаются в миллисекундах.
 
@@ -74,7 +91,7 @@ curl -i localhost:8080/ready
 |---|---|
 | `make migrate` | накатить миграции goose |
 | `make run` | запустить сервис |
-| `make test` | `go test -race -count=2 ./...` с отчётом покрытия |
+| `make test` | `go test -race -count=2 -tags=integration ./...` с отчётом покрытия |
 | `make test-integration` | прогнать тесты с PostgreSQL, тегом `integration`, `-race` и `-count=2` |
 | `make test-mutation` | прогнать мутационные тесты домена и usecase |
 | `make lint` | `golangci-lint` |
@@ -83,27 +100,54 @@ curl -i localhost:8080/ready
 
 Интеграционные тесты по умолчанию поднимают PostgreSQL через Testcontainers. Вместо этого можно задать `TRIPGO_TEST_DATABASE_URL` существующей БД. Каждый сценарий создаёт и удаляет отдельную схему, поэтому пользователю БД нужны соответствующие права. Есть проверка отката поездки и истории при ошибке второго INSERT.
 
-Последний unit-прогон: домен - 77,3%, usecase `create` - 93,6%, `get` и `finish` - 100%. Актуальное покрытие печатает `make test`.
+Последний unit-прогон: домен - 80,8%, usecase `trip/create` - 93,6%, остальные usecase (`trip/get`, `trip/finish`, `position/create`, `position/list`) - 100%, `worker/positions` - 94,8%, `gateway/push` - 86,2%. Актуальное покрытие печатает `make test`.
 
 ## Архитектура
 
-Диаграмма показывает вызовы. Usecase обращается к репозиторию через интерфейс и не импортирует его реализацию.
+Диаграмма показывает вызовы. Usecase и worker обращаются к внешним зависимостям через интерфейсы и не импортируют их реализации.
 
 ```mermaid
 flowchart LR
-    HTTP[HTTP handlers] --> UC[Usecase: create / get / finish]
+    HTTP[HTTP handlers] --> UC[Usecase: trip / position]
     UC --> Domain[Domain: правила поездки]
     UC -->|интерфейсы| Repo[Repository и менеджер транзакций]
+    UC -->|отмена задачи| Worker[Worker: positions]
+    Worker -->|интерфейсы| Repo
+    Worker -->|интерфейс| Gateway[Gateway: push]
     Repo --> DB[(PostgreSQL)]
+    Gateway -->|HTTP| Push[Push Service]
 ```
 
-main читает конфигурацию, создаёт контейнер и управляет запуском и остановкой. internal/container собирает конкретные зависимости. HTTP разбирает запросы и формирует ответы, usecase выполняет сценарии, домен проверяет поля и переходы статусов. Репозитории выполняют SQL, infra содержит пул БД, транзакции и телеметрию.
+main читает конфигурацию, создаёт контейнер и управляет запуском и остановкой. internal/container собирает конкретные зависимости. HTTP разбирает запросы и формирует ответы, usecase выполняет сценарии, домен проверяет поля и переходы статусов, worker опрашивает устаревшие поездки, gateway отвечает за HTTP-вызовы в Push Service. Репозитории выполняют SQL, infra содержит пул БД, транзакции и телеметрию.
 
-У каждого действия свой пакет. Узкие неэкспортируемые интерфейсы объявлены в contract.go потребителя: HTTP объявляет интерфейс usecase, usecase - интерфейсы репозиториев и транзакций. Это позволяет подменять реализации и проверять сценарии с моками. Моки генерируются через `go:generate` в соседние mocks_test.go.
+У каждого действия свой пакет. Узкие неэкспортируемые интерфейсы объявлены в contract.go потребителя: HTTP объявляет интерфейс usecase, usecase и worker - интерфейсы репозиториев, транзакций, очереди, метрик и клиента Push Service. Это позволяет подменять реализации и проверять сценарии с моками. Моки генерируются через `go:generate` в соседние mocks_test.go.
 
 Домен не зависит от транспорта и инфраструктуры. Usecase не импортирует HTTP, сгенерированный API и реализации репозиториев. HTTP не импортирует репозитории и инфраструктуру. Эти границы проверяет depguard.
 
 HTTP использует сгенерированные типы API. Между слоями передаются DTO из internal/model, а создание и завершение проверяет доменная модель. Координаты и статусы - общие доменные типы значений. Ошибки переводятся в HTTP-ответ в одном месте - domainerror.ToProblem. Детали внутренних ошибок остаются в логах.
+
+## Опрос устаревших поездок
+
+Фоновый пакет `internal/worker/positions` запрашивает координаты у водителей, если по активной поездке давно не приходили точки.
+
+```mermaid
+flowchart LR
+    DB[(PostgreSQL)] -->|батч по курсору| Scanner[Сканер]
+    Scanner -->|неблокирующий Enqueue| Queue[Приоритетная очередь]
+    HTTP[POST /positions] -->|Cancel| Queue
+    Queue -->|Pop| Workers[Пул воркеров]
+    Workers -->|HTTP POST /api/v1/push| Push[Push Service]
+```
+
+Очередь ограничена POSITION_QUEUE_SIZE элементами и построена на двух синхронизированных кучах `container/heap`: воркеры всегда забирают поездку, которая молчит дольше всех, на каком бы тике она ни попала в очередь. Таблица queued и множество running под общим мьютексом не дают поставить поездку повторно, пока она ждёт в очереди или обрабатывается воркером. Если до начала отправки пришла свежая координата, Cancel удаляет задачу из очереди, и запрос в Push Service не уходит.
+
+При исчерпании очереди сканер не блокируется. Новая поездка сравнивается с самой свежей в очереди:
+- если новая поездка молчит дольше, она вытесняет самую свежую (`tripgo.stale_checks{result="dropped"}` и `Warn` в лог) и занимает её место (`queued`);
+- если новая поездка свежее всех в очереди, отбрасывается она сама (`dropped` и `Warn` в лог).
+
+Первый dropped на тике останавливает чтение следующих порций из БД. Отброшенные поездки не теряются: их `last_position_at` не обновился, поэтому на следующем тике сканер снова прочитает их с первой порции.
+
+Остановка идёт по шагам в пределах `SHUTDOWN_TIMEOUT`: сначала закрывается приём HTTP-запросов, затем останавливается сканер и закрывается очередь, после чего воркеры дорабатывают оставшиеся в очереди задачи, и в конце закрываются HTTP-клиент Push Service, пул БД и телеметрия.
 
 ## Решения
 
@@ -129,7 +173,7 @@ HTTP использует сгенерированные типы API. Межд�
 
 ## Наблюдаемость
 
-Трейсы и метрики идут по OTLP в collector. HTTP инструментирован через otelhttp, PostgreSQL - через otelpgx на уровне пула. Логи slog пишутся в stdout в JSON и содержат trace_id и span_id внутри спана. Порядок middleware: Recover -> Tracing -> Logging -> Metrics -> router.
+Трейсы и метрики идут по OTLP в collector. HTTP инструментирован через otelhttp, PostgreSQL - через otelpgx на уровне пула, клиент Push Service - через otelhttp transport. Спаны воркеров связаны со спаном тика сканера через span link. Логи slog пишутся в stdout в JSON и содержат trace_id и span_id внутри спана. Порядок middleware: Recover -> Tracing -> Logging -> Metrics -> router.
 
 Адреса Jaeger, Grafana и Prometheus выводит `tripgoctl connect`.
 

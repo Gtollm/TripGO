@@ -35,7 +35,7 @@ func TestHandler(t *testing.T) {
 			id := uuid.New()
 			item := model.Trip{ID: id, Status: trip.StatusACTIVE}
 			u.EXPECT().Run(gomock.Any(), model.GetTrip{ID: id}).Return(model.GetTripResult{Trip: item}, tc.failure)
-			router := transport.NewRouter(nil, get.New(u), nil, nil)
+			router := transport.NewRouter(nil, get.New(u), nil, nil, nil, nil)
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/trips/"+id.String(), nil))
 			require.Equal(t, tc.status, response.Code)
@@ -56,7 +56,7 @@ func TestInvalidID(t *testing.T) {
 	t.Parallel()
 
 	u := NewMockusecase(gomock.NewController(t))
-	router := transport.NewRouter(nil, get.New(u), nil, nil)
+	router := transport.NewRouter(nil, get.New(u), nil, nil, nil, nil)
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/trips/not-a-uuid", nil))
 	require.Equal(t, 400, response.Code)

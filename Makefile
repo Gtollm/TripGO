@@ -12,7 +12,7 @@ run:
 
 test:
 	@set -eu; coverage=$$(mktemp); trap 'rm -f "$$coverage"' EXIT; \
-	go test -race -count=2 -coverprofile="$$coverage" ./...; \
+	go test -race -count=2 -tags=integration -coverprofile="$$coverage" ./...; \
 	go tool cover -func="$$coverage"
 
 test-integration:
@@ -33,7 +33,7 @@ generate:
 	go tool oapi-codegen \
       -generate types,chi-server \
       -package api \
-      -include-operation-ids createTrip,getTrip,finishTrip,health,ready \
+      -include-operation-ids createTrip,getTrip,finishTrip,createTripPosition,listTripPositions,health,ready \
       -o internal/generated/api.gen.go \
       contracts/openapi/trip-service.openapi.yaml
 	go generate ./internal/...
